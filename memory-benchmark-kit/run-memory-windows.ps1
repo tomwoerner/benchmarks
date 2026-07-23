@@ -5,12 +5,33 @@ param(
     [switch]$AcceptIntelLicense,
     [switch]$InstallPassMark,
     [switch]$SkipMlc,
+    [switch]$OneDrive,
     [Int64]$StreamArraySize = 50000000,
     [int]$NTimes = 10,
     [string]$OutputRoot = "$HOME\benchmarks\memory"
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($OneDrive) {
+    if ($PSBoundParameters.ContainsKey('OutputRoot')) {
+        throw "Use either -OneDrive or -OutputRoot, not both."
+    }
+    $oneDriveCandidates = @(
+        $env:OneDriveCommercial,
+        $env:OneDriveConsumer,
+        $env:OneDrive
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+    $selectedOneDrive = $null
+    foreach ($candidate in $oneDriveCandidates) {
+        $documentsCandidate = Join-Path $candidate "Documents"
+        if (Test-Path $documentsCandidate) { $selectedOneDrive = $candidate; break }
+    }
+    if (-not $selectedOneDrive) {
+        throw "OneDrive was requested, but no usable OneDrive\Documents folder was found. Confirm OneDrive is signed in or use -OutputRoot with an explicit path."
+    }
+    $OutputRoot = Join-Path $selectedOneDrive "Documents\benchmarks\memory"
+}
 $StreamCommit = "6703f7504a38a8da96b353cadafa64d3c2d7a2d3"
 $Stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 $HostNameSafe = $env:COMPUTERNAME -replace '[^A-Za-z0-9_.-]', '_'
@@ -47,7 +68,7 @@ try {
     @{
         OS = $os | Select-Object Caption, Version, BuildNumber, OSArchitecture
         Computer = $computer | Select-Object Manufacturer, Model, TotalPhysicalMemory, NumberOfLogicalProcessors
-        CPU = $cpu | Select-Object Manufacturer, Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
+        CPU = $cpu | Select-Object Manufacturer, Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, Architecture, AddressWidth, DataWidth
         DIMMs = $memory | Select-Object Manufacturer, PartNumber, Capacity, Speed, ConfiguredClockSpeed, BankLabel, DeviceLocator
         PowerShell = $PSVersionTable
     } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $OutDir "system-info.json")
@@ -80,9 +101,27 @@ try {
             & $Gcc -O3 -march=native -fopenmp "-DSTREAM_ARRAY_SIZE=$StreamArraySize" "-DNTIMES=$NTimes" $StreamSource -o $StreamExe
             if ($LASTEXITCODE -ne 0) { throw "STREAM compilation failed with exit code $LASTEXITCODE." }
             $env:OMP_NUM_THREADS = if ($env:OMP_NUM_THREADS) { $env:OMP_NUM_THREADS } else { [string]$computer.NumberOfLogicalProcessors }
-            $env:OMP_PROC_BIND = if ($env:OMP_PROC_BIND) { $env:OMP_PROC_BIND } else { "spread" }
-            $env:OMP_PLACES = if ($env:OMP_PLACES) { $env:OMP_PLACES } else { "threads" }
-            & $StreamExe 2>&1 | Tee-Object -FilePath (Join-Path $OutDir "stream.txt")
+
+            # GCC/libgomp on some Windows systems does not support OpenMP affinity.
+            # Disable binding explicitly so this harmless warning does not abort the run.
+            $env:OMP_PROC_BIND = "false"
+            Remove-Item Env:OMP_PLACES -ErrorAction SilentlyContinue
+
+            # Windows PowerShell converts native stderr into ErrorRecord objects.
+            # Temporarily allow native warnings to flow through Tee-Object, then check
+            # the real process exit code explicitly.
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & $StreamExe 2>&1 | Tee-Object -FilePath (Join-Path $OutDir "stream.txt")
+                $streamExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($streamExitCode -ne 0) {
+                throw "STREAM execution failed with exit code $streamExitCode. See $(Join-Path $OutDir 'stream.txt')."
+            }
         } else {
             Write-Warning "STREAM skipped: MSYS2 GCC not found. Re-run with -InstallDependencies."
         }
@@ -107,8 +146,26 @@ try {
     }
     if (-not $SkipMlc -and $cpu.Manufacturer -match 'Intel' -and $MlcExe) {
         if (-not (Test-IsAdministrator)) { Write-Warning "Run PowerShell as Administrator for complete MLC access." }
+        $mlcFailures = @()
         foreach ($test in @('max_bandwidth','peak_injection_bandwidth','loaded_latency','idle_latency')) {
-            & $MlcExe "--$test" 2>&1 | Tee-Object -FilePath (Join-Path $OutDir "mlc-$test.txt")
+            $mlcOutput = Join-Path $OutDir "mlc-$test.txt"
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & $MlcExe "--$test" 2>&1 | Tee-Object -FilePath $mlcOutput
+                $mlcExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            if ($mlcExitCode -ne 0) {
+                $mlcFailures += $test
+                Write-Warning "MLC test '$test' was not supported or failed on this system (exit code $mlcExitCode). STREAM results remain valid. See $mlcOutput."
+            }
+        }
+        if ($mlcFailures.Count -gt 0) {
+            "Unsupported or failed MLC tests: $($mlcFailures -join ', ')" |
+                Set-Content -Encoding UTF8 (Join-Path $OutDir "mlc-warnings.txt")
         }
     } elseif (-not $SkipMlc -and $cpu.Manufacturer -match 'Intel') {
         Write-Warning "Intel CPU detected but MLC was not found. Add -InstallMlc -AcceptIntelLicense."

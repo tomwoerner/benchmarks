@@ -29,15 +29,76 @@ Results are stored under:
 
 ## Windows x64
 
-Run PowerShell as Administrator:
+Run PowerShell as Administrator from the directory containing the script:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\run-memory-windows.ps1 -InstallDependencies
 ```
 
-This installs MSYS2/GCC when needed, builds the same pinned STREAM source, runs it, and logs the result. On Intel, add `-InstallMlc -AcceptIntelLicense` to install/run MLC locally. Add `-InstallPassMark` to open the official PerformanceTest installer; rerun afterward and the script will execute the memory-only suite and export CSV/text.
+This installs MSYS2/GCC when needed, builds the same pinned STREAM source, runs it, and logs the result.
 
+### Save results to OneDrive Documents
+
+Add `-OneDrive`:
+
+```powershell
+.\run-memory-windows.ps1 -InstallDependencies -OneDrive
+```
+
+Expected root:
+
+```text
+C:\Users\<username>\OneDrive\Documents\benchmarks\memory
+```
+
+The script also checks business OneDrive through `OneDriveCommercial`. If OneDrive is unavailable, use `-OutputRoot` with an explicit path. Do not combine `-OneDrive` and `-OutputRoot`.
+
+### Intel MLC
+
+```powershell
+.\run-memory-windows.ps1 `
+    -InstallDependencies `
+    -InstallMlc `
+    -AcceptIntelLicense `
+    -OneDrive
+```
+
+MLC is supplemental and Intel-specific. STREAM remains the primary vendor-neutral result. Older Xeon E5/Ivy Bridge systems should still run STREAM. If an individual MLC test is unsupported or fails, the script keeps valid STREAM results, saves that MLC output, writes `mlc-warnings.txt`, and continues.
+
+### Output locations
+
+Default:
+
+```text
+C:\Users\<username>\benchmarks\memory\<COMPUTERNAME>_<UTC timestamp>
+```
+
+With `-OneDrive`:
+
+```text
+<OneDrive>\Documents\benchmarks\memory\<COMPUTERNAME>_<UTC timestamp>
+```
+
+Custom:
+
+```powershell
+.\run-memory-windows.ps1 -OutputRoot "D:\BenchmarkResults"
+```
+
+Typical files:
+
+```text
+run.log
+stream.txt
+system-info.json
+system-info.txt
+mlc-max_bandwidth.txt
+mlc-peak_injection_bandwidth.txt
+mlc-loaded_latency.txt
+mlc-idle_latency.txt
+mlc-warnings.txt
+```
 ## macOS Intel or Apple Silicon
 
 Install Homebrew first, then:
